@@ -227,14 +227,22 @@ func (ri *rbdImage) copyEncryptionConfig(ctx context.Context, cp *rbdImage, copy
 		var err error
 		cp.fileEncryption, err = util.NewVolumeEncryption(ri.fileEncryption.GetID(), ri.fileEncryption.KMS, nil)
 		if errors.Is(err, util.ErrDEKStoreNeeded) {
-			_, err := ri.fileEncryption.KMS.GetSecret(ctx, "")
-			if errors.Is(err, kmsapi.ErrGetSecretUnsupported) {
+			// the wrapped DEK is kept in the metadata of the cloned
+			// RBD image, like configureFileEncryption does for new
+			// images
+			err = setupFileEncryptionDEKStore(ctx, cp.fileEncryption, cp)
+			if err != nil {
 				return err
 			}
 		}
 	}
 
-	if ri.isFileEncrypted() && ri.fileEncryption.KMS.RequiresDEKStore() == kmsapi.DEKStoreIntegrated {
+	if ri.isFileEncrypted() && ri.fileEncryption.HasDEKStore() {
+		if cp.fileEncryption == nil {
+			return fmt.Errorf("BUG: file encryption of %q is not "+
+				"initialized, call stack: %s", cp, util.CallStack())
+		}
+
 		// get the unencrypted passphrase
 		passphrase, err := ri.fileEncryption.GetCryptoPassphrase(ctx, ri.VolID)
 		if err != nil {
@@ -468,15 +476,27 @@ func (ri *rbdImage) configureFileEncryption(ctx context.Context, kmsID string, c
 	ri.fileEncryption, err = util.NewVolumeEncryption(kmsID, kms, nil)
 
 	if errors.Is(err, util.ErrDEKStoreNeeded) {
-		// fscrypt uses secrets directly from the KMS.
-		// Therefore we do not support an additional DEK
-		// store. Since not all "metadata" KMS support
-		// GetSecret, test for support here. Postpone any
-		// other error handling
-		_, err := ri.fileEncryption.KMS.GetSecret(ctx, "")
-		if errors.Is(err, kmsapi.ErrGetSecretUnsupported) {
-			return err
-		}
+		return setupFileEncryptionDEKStore(ctx, ri.fileEncryption, ri)
+	}
+
+	return nil
+}
+
+// setupFileEncryptionDEKStore attaches the given DEK store when the provider
+// keeps its wrapped DEK in the metadata of the RBD image. Otherwise fscrypt
+// uses secrets directly from the KMS; since not all "metadata" KMS support
+// GetSecret, support is tested here and any other error handling is
+// postponed.
+func setupFileEncryptionDEKStore(ctx context.Context, enc *util.VolumeEncryption, store kmsapi.DEKStore) error {
+	if kmsapi.SupportsVolumeDEKStore(enc.KMS) {
+		enc.SetDEKStore(store)
+
+		return nil
+	}
+
+	_, err := enc.KMS.GetSecret(ctx, "")
+	if errors.Is(err, kmsapi.ErrGetSecretUnsupported) {
+		return err
 	}
 
 	return nil
