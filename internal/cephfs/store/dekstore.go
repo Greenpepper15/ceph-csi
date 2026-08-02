@@ -110,3 +110,80 @@ func (s *subVolumeDEKStore) validateVolumeID(volumeID string) error {
 
 	return nil
 }
+
+// snapshotDEKStore implements kms.DEKStore on the metadata of a CephFS
+// subvolume snapshot. The DEK of an encrypted volume is stored under the
+// snapshot ID when the snapshot is taken, so that a volume created from the
+// snapshot can receive the same DEK.
+type snapshotDEKStore struct {
+	// vo describes the parent subvolume of the snapshot.
+	vo *VolumeOptions
+	// snapshotName is the name of the subvolume snapshot that holds the
+	// DEK.
+	snapshotName string
+}
+
+// newSnapshotDEKStore returns a DEKStore that keeps the encrypted DEK in the
+// metadata of the named snapshot of the subvolume described by the
+// VolumeOptions.
+func newSnapshotDEKStore(vo *VolumeOptions, snapshotName string) kms.DEKStore {
+	return &snapshotDEKStore{vo: vo, snapshotName: snapshotName}
+}
+
+// StoreDEK saves the encrypted DEK in the snapshot metadata.
+func (s *snapshotDEKStore) StoreDEK(ctx context.Context, volumeID, dek string) error {
+	if err := s.validateSnapshotID(volumeID); err != nil {
+		return err
+	}
+
+	snapClient := core.NewSnapshot(s.vo.GetConnection(), s.snapshotName, s.vo.ClusterID, "", &s.vo.SubVolume)
+
+	// ErrSubVolSnapMetadataNotSupported is fatal here, unlike for the
+	// optional bookkeeping metadata: silently skipping the write would
+	// produce a snapshot that can not be restored.
+	err := snapClient.SetSnapshotMetadata(cephfsMetadataDEK, dek)
+	if err != nil {
+		return fmt.Errorf("failed to store the DEK for snapshot %q: %w", volumeID, err)
+	}
+
+	return nil
+}
+
+// FetchDEK reads the encrypted DEK from the snapshot metadata.
+func (s *snapshotDEKStore) FetchDEK(ctx context.Context, volumeID string) (string, error) {
+	if err := s.validateSnapshotID(volumeID); err != nil {
+		return "", err
+	}
+
+	snapClient := core.NewSnapshot(s.vo.GetConnection(), s.snapshotName, s.vo.ClusterID, "", &s.vo.SubVolume)
+
+	dek, err := snapClient.GetSnapshotMetadata(cephfsMetadataDEK)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch the DEK for snapshot %q: %w", volumeID, err)
+	}
+
+	return dek, nil
+}
+
+// RemoveDEK does not need to remove the DEK from the snapshot metadata, the
+// snapshot is most likely getting removed along with its metadata.
+func (s *snapshotDEKStore) RemoveDEK(ctx context.Context, volumeID string) error {
+	return s.validateSnapshotID(volumeID)
+}
+
+// validateSnapshotID confirms that the snapshotID the DEK is keyed by
+// belongs to the snapshot this store wraps. The snapshot ID and the snapshot
+// name both end in the ObjectUUID of the snapshot.
+func (s *snapshotDEKStore) validateSnapshotID(snapshotID string) error {
+	if s.snapshotName == "" || s.vo.VolID == "" {
+		return fmt.Errorf("the snapshot DEK store for %q requires a provisioned subvolume snapshot",
+			snapshotID)
+	}
+
+	if len(snapshotID) < uuidLength || len(s.snapshotName) < uuidLength ||
+		snapshotID[len(snapshotID)-uuidLength:] != s.snapshotName[len(s.snapshotName)-uuidLength:] {
+		return fmt.Errorf("snapshot %q can not store the DEK for %q", s.snapshotName, snapshotID)
+	}
+
+	return nil
+}

@@ -78,6 +78,36 @@ type subvolumeMetadataHandler struct {
 	listMetadataFunc     func() (map[string]string, error)
 }
 
+// copyCloneEncryptionPassphrase copies the DEK from the clone source to the
+// clone, for a KMS that keeps the wrapped DEK in the metadata of the volume.
+// It must only run once the clone subvolume exists, and it is idempotent, so
+// it runs on the retry that finds an already completed clone as well: an
+// asynchronous clone usually finishes long after the attempt that initiated
+// it returned.
+func copyCloneEncryptionPassphrase(
+	ctx context.Context,
+	parentVol, volOptions *store.VolumeOptions,
+	sID *store.SnapshotIdentifier,
+	pvID, vID *store.VolumeIdentifier,
+) error {
+	if parentVol == nil {
+		return nil
+	}
+
+	sourceSnapshotName, sourceID := "", ""
+	if sID != nil {
+		sourceSnapshotName, sourceID = sID.FsSnapshotName, sID.SnapshotID
+	} else if pvID != nil {
+		sourceID = pvID.VolumeID
+	}
+
+	if sourceID == "" {
+		return nil
+	}
+
+	return parentVol.CopyEncryptionPassphrase(ctx, volOptions, sourceSnapshotName, sourceID, vID.VolumeID)
+}
+
 // createBackingVolume creates the backing subvolume and on any error cleans up any created entities.
 func (cs *cephfsControllerServer) createBackingVolume(
 	ctx context.Context,
@@ -410,6 +440,14 @@ func (cs *cephfsControllerServer) CreateVolume(
 			if err != nil {
 				return nil, status.Error(codes.Internal, err.Error())
 			}
+
+			// The clone may have been completed by an earlier attempt
+			// that returned before it could copy the DEK, so copy it
+			// here as well.
+			err = copyCloneEncryptionPassphrase(ctx, parentVol, volOptions, sID, pvID, vID)
+			if err != nil {
+				return nil, status.Error(codes.Internal, err.Error())
+			}
 		}
 
 		// apply MutableParameters (e.g. MDS pinning) from a
@@ -483,6 +521,20 @@ func (cs *cephfsControllerServer) CreateVolume(
 
 		// Set Metadata on PV Create
 		err = volClient.SetAllMetadata(metadata)
+		if err != nil {
+			purgeErr := volClient.PurgeVolume(ctx, true)
+			if purgeErr != nil {
+				log.ErrorLog(ctx, "failed to delete volume %s: %v", vID.FsSubvolName, purgeErr)
+			}
+
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+
+		// Copy the DEK from the source to the newly created clone. This
+		// has to happen after the subvolume exists, because a KMS
+		// without its own DEK store keeps the wrapped DEK in the
+		// metadata of the subvolume itself.
+		err = copyCloneEncryptionPassphrase(ctx, parentVol, volOptions, sID, pvID, vID)
 		if err != nil {
 			purgeErr := volClient.PurgeVolume(ctx, true)
 			if purgeErr != nil {
@@ -899,6 +951,14 @@ func (cs *cephfsControllerServer) CreateSnapshot(
 			}
 		}
 
+		// The snapshot may have been taken by an earlier attempt that
+		// returned before it could copy the DEK. The copy is
+		// idempotent, so run it here as well.
+		err = parentVolOptions.CopySnapshotEncryptionPassphrase(ctx, sid.FsSnapshotName, sourceVolID, sid.SnapshotID)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+
 		return &csi.CreateSnapshotResponse{
 			Snapshot: &csi.Snapshot{
 				SizeBytes:      info.BytesQuota,
@@ -931,8 +991,7 @@ func (cs *cephfsControllerServer) CreateSnapshot(
 
 	// Use same encryption KMS than source volume and copy the passphrase. The passphrase becomes
 	// available under the snapshot id for CreateVolume to use this snap as a backing volume
-	snapVolOptions := store.VolumeOptions{}
-	err = parentVolOptions.CopyEncryptionConfig(ctx, &snapVolOptions, sourceVolID, sID.SnapshotID)
+	err = parentVolOptions.CopySnapshotEncryptionPassphrase(ctx, sID.FsSnapshotName, sourceVolID, sID.SnapshotID)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}

@@ -55,3 +55,24 @@ func TestSubVolumeDEKStoreValidateVolumeID(t *testing.T) {
 	vo.VolID = "csi-vol-" + testUUID
 	require.Error(t, dekStore.validateVolumeID("too-short"))
 }
+
+func TestSnapshotDEKStoreValidateSnapshotID(t *testing.T) {
+	t.Parallel()
+
+	snapshotID := "0001-0009-rook-ceph-0000000000000001-" + testUUID
+
+	vo := &VolumeOptions{}
+	vo.VolID = "csi-vol-" + testOtherUUID
+	dekStore := &snapshotDEKStore{vo: vo}
+
+	// the snapshot name is not resolved yet
+	require.Error(t, dekStore.validateSnapshotID(snapshotID))
+
+	// the snapshot of the snapshot ID
+	dekStore.snapshotName = "csi-snap-" + testUUID
+	require.NoError(t, dekStore.validateSnapshotID(snapshotID))
+
+	// a different snapshot
+	dekStore.snapshotName = "csi-snap-" + testOtherUUID
+	require.Error(t, dekStore.validateSnapshotID(snapshotID))
+}

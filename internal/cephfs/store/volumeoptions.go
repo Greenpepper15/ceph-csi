@@ -974,6 +974,12 @@ func IsEncrypted(ctx context.Context, volOptions map[string]string) (bool, error
 
 // CopyEncryptionConfig copies passphrases and initializes a fresh
 // Encryption struct if necessary from (vo, vID) to (cp, cpVID).
+//
+// For a KMS with an integrated DEK store the passphrase is copied right
+// away. For a KMS that can only wrap and unwrap the DEK, the wrapped DEK
+// lives in the metadata of the destination subvolume, which does not exist
+// yet when this runs. That copy is done by CopyEncryptionPassphrase, after
+// the destination has been created.
 func (vo *VolumeOptions) CopyEncryptionConfig(ctx context.Context, cp *VolumeOptions, vID, cpVID string) error {
 	var err error
 
@@ -989,8 +995,14 @@ func (vo *VolumeOptions) CopyEncryptionConfig(ctx context.Context, cp *VolumeOpt
 	if cp.Encryption == nil {
 		cp.Encryption, err = util.NewVolumeEncryption(vo.Encryption.GetID(), vo.Encryption.KMS, nil)
 		if errors.Is(err, util.ErrDEKStoreNeeded) {
-			_, err := vo.Encryption.KMS.GetSecret(ctx, "")
-			if errors.Is(err, kmsapi.ErrGetSecretUnsupported) {
+			if cp.BackingSnapshot && kmsapi.SupportsVolumeDEKStore(vo.Encryption.KMS) {
+				// a snapshot-backed volume has no subvolume of
+				// its own that could hold the wrapped DEK
+				return err
+			}
+
+			err = setupVolumeDEKStore(ctx, cp.Encryption, newSubVolumeDEKStore(cp))
+			if err != nil {
 				return err
 			}
 		}
@@ -1008,6 +1020,103 @@ func (vo *VolumeOptions) CopyEncryptionConfig(ctx context.Context, cp *VolumeOpt
 			return fmt.Errorf("failed to store passphrase for %q (%+v): %w",
 				cpVID, cp, err)
 		}
+	}
+
+	return nil
+}
+
+// CopyEncryptionPassphrase copies the DEK from the source (vo, vID) to the
+// clone (cp, cpVID) for a KMS that keeps the wrapped DEK in the metadata of
+// the volume. It must run after the clone subvolume has been created. When
+// sourceSnapshotName is set, the DEK is fetched from the metadata of that
+// snapshot of vo instead of from the subvolume of vo itself.
+//
+// For a KMS with an integrated DEK store this is a no-op, the passphrase was
+// already copied by CopyEncryptionConfig.
+func (vo *VolumeOptions) CopyEncryptionPassphrase(
+	ctx context.Context,
+	cp *VolumeOptions,
+	sourceSnapshotName, vID, cpVID string,
+) error {
+	if !vo.IsEncrypted() ||
+		vo.Encryption.KMS.RequiresDEKStore() != kmsapi.DEKStoreMetadata ||
+		!vo.Encryption.HasDEKStore() {
+		// nothing to copy: either the KMS stores the DEK itself and
+		// CopyEncryptionConfig handled it, or the KMS hands out its
+		// secret directly and has no per-volume DEK
+		return nil
+	}
+
+	if cp.Encryption == nil {
+		return fmt.Errorf("BUG: no encryption configured for the clone of %q, "+
+			"call CopyEncryptionConfig or InitKMS first! Call stack: %s",
+			vID, util.CallStack())
+	}
+
+	srcEnc := vo.Encryption
+	if sourceSnapshotName != "" {
+		// the DEK of a snapshot lives in the snapshot metadata, not in
+		// the metadata of the parent subvolume
+		var err error
+		srcEnc, err = util.NewVolumeEncryption(vo.Encryption.GetID(), vo.Encryption.KMS, nil)
+		if err != nil && !errors.Is(err, util.ErrDEKStoreNeeded) {
+			return err
+		}
+		srcEnc.SetDEKStore(newSnapshotDEKStore(vo, sourceSnapshotName))
+	}
+
+	passphrase, err := srcEnc.GetCryptoPassphrase(ctx, vID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch passphrase for %q (%+v): %w",
+			vID, vo, err)
+	}
+
+	err = cp.Encryption.StoreCryptoPassphrase(ctx, cpVID, passphrase)
+	if err != nil {
+		return fmt.Errorf("failed to store passphrase for %q (%+v): %w",
+			cpVID, cp, err)
+	}
+
+	return nil
+}
+
+// CopySnapshotEncryptionPassphrase copies the DEK of the encrypted volume vo
+// under the snapshot ID when a snapshot is taken, so that CreateVolume can
+// use the snapshot as a source. For a KMS without its own DEK store the
+// wrapped DEK is stored in the metadata of the snapshot, which must
+// therefore exist already.
+func (vo *VolumeOptions) CopySnapshotEncryptionPassphrase(
+	ctx context.Context,
+	snapshotName, vID, snapshotID string,
+) error {
+	if !vo.IsEncrypted() || !vo.Encryption.HasDEKStore() {
+		// a KMS that hands out its secret directly has no per-volume
+		// DEK to copy
+		return nil
+	}
+
+	if vID == snapshotID {
+		return fmt.Errorf("BUG: %v has the same ID %q as its snapshot "+
+			"set!? Call stack: %s", vo, vID, util.CallStack())
+	}
+
+	snapEnc, err := util.NewVolumeEncryption(vo.Encryption.GetID(), vo.Encryption.KMS, nil)
+	if errors.Is(err, util.ErrDEKStoreNeeded) {
+		snapEnc.SetDEKStore(newSnapshotDEKStore(vo, snapshotName))
+	} else if err != nil {
+		return err
+	}
+
+	passphrase, err := vo.Encryption.GetCryptoPassphrase(ctx, vID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch passphrase for %q (%+v): %w",
+			vID, vo, err)
+	}
+
+	err = snapEnc.StoreCryptoPassphrase(ctx, snapshotID, passphrase)
+	if err != nil {
+		return fmt.Errorf("failed to store passphrase for snapshot %q of %q: %w",
+			snapshotID, vID, err)
 	}
 
 	return nil

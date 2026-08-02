@@ -67,6 +67,25 @@ func (s *snapshotClient) setSnapshotMetadata(key, value string) error {
 	return err
 }
 
+// getSnapshotMetadata returns the value of custom metadata set on the
+// subvolume snapshot in a volume using the metadata key.
+func (s *snapshotClient) getSnapshotMetadata(key string) (string, error) {
+	if !s.supportsSubVolSnapMetadata() {
+		return "", ErrSubVolSnapMetadataNotSupported
+	}
+	fsa, err := s.conn.GetFSAdmin()
+	if err != nil {
+		return "", err
+	}
+
+	value, err := fsa.GetSnapshotMetadata(s.FsName, s.SubvolumeGroup, s.VolID, s.SnapshotID, key)
+	if !s.isUnsupportedSubVolSnapMetadata(err) {
+		return "", ErrSubVolSnapMetadataNotSupported
+	}
+
+	return value, err
+}
+
 // removeSnapshotMetadata removes custom metadata set on the subvolume
 // snapshot in a volume using the metadata key.
 func (s *snapshotClient) removeSnapshotMetadata(key string) error {
@@ -102,6 +121,32 @@ func (s *snapshotClient) listSnapshotMetadata() (map[string]string, error) {
 	}
 
 	return metadata, err
+}
+
+// GetSnapshotMetadata returns the value of a single metadata key set on the
+// subvolume snapshot. Unlike ListSnapshotMetadata it propagates
+// ErrSubVolSnapMetadataNotSupported, so that callers which require metadata
+// support can fail instead of degrading.
+func (s *snapshotClient) GetSnapshotMetadata(key string) (string, error) {
+	value, err := s.getSnapshotMetadata(key)
+	if err != nil {
+		return "", fmt.Errorf("failed to get metadata key %q on subvolume snapshot %v: %w", key, s, err)
+	}
+
+	return value, nil
+}
+
+// SetSnapshotMetadata sets a single metadata key on the subvolume snapshot.
+// Unlike SetAllSnapshotMetadata it propagates
+// ErrSubVolSnapMetadataNotSupported, so that callers which require metadata
+// support can fail instead of degrading.
+func (s *snapshotClient) SetSnapshotMetadata(key, value string) error {
+	err := s.setSnapshotMetadata(key, value)
+	if err != nil {
+		return fmt.Errorf("failed to set metadata key %q on subvolume snapshot %v: %w", key, s, err)
+	}
+
+	return nil
 }
 
 // SetAllSnapshotMetadata set all the metadata from arg parameters on

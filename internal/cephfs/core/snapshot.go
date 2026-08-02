@@ -49,6 +49,12 @@ type SnapshotClient interface {
 	UnsetAllSnapshotMetadata(keys []string) error
 	// ListSnapshotMetadata lists all the metadata on subvolume snapshot.
 	ListSnapshotMetadata() (map[string]string, error)
+	// GetSnapshotMetadata returns the value of a single metadata key, and
+	// fails when the cluster does not support subvolume snapshot metadata.
+	GetSnapshotMetadata(key string) (string, error)
+	// SetSnapshotMetadata sets a single metadata key, and fails when the
+	// cluster does not support subvolume snapshot metadata.
+	SetSnapshotMetadata(key, value string) error
 }
 
 // snapshotClient is the implementation of SnapshotClient interface.
