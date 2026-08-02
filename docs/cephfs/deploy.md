@@ -269,6 +269,12 @@ However, not all KMS are supported in order to be compatible with
 either store secrets to use directly (Vault), or allow access to the
 plain password (Kubernetes Secrets) work.
 
+KMS services that can only encrypt and decrypt the DEK work as well:
+`aws-metadata`, `aws-sts-metadata`, `ibmkeyprotect` and `kmip-metadata`
+(a provider that reuses the configuration and credentials Secret of
+`kmip`). The wrapped DEK is stored in the metadata of the subvolume,
+which requires a Ceph cluster with subvolume metadata support.
+
 ## CephFS PVC Provisioning
 
 Requires subvolumegroup to be created before provisioning the PVC.
