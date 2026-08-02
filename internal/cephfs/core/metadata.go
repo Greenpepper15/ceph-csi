@@ -94,6 +94,24 @@ func (s *subVolumeClient) setMetadata(key, value string) error {
 	return err
 }
 
+// getMetadata returns the value of custom metadata set on the subvolume in a
+// volume using the metadata key.
+func (s *subVolumeClient) getMetadata(key string) (string, error) {
+	if !s.supportsSubVolMetadata() {
+		return "", ErrSubVolMetadataNotSupported
+	}
+	fsa, err := s.conn.GetFSAdmin()
+	if err != nil {
+		return "", err
+	}
+	value, err := fsa.GetMetadata(s.FsName, s.SubvolumeGroup, s.VolID, key)
+	if !s.isUnsupportedSubVolMetadata(err) {
+		return "", ErrSubVolMetadataNotSupported
+	}
+
+	return value, err
+}
+
 // removeMetadata removes custom metadata set on the subvolume in a volume
 // using the metadata key.
 func (s *subVolumeClient) removeMetadata(key string) error {
@@ -129,6 +147,31 @@ func (s *subVolumeClient) listMetadata() (map[string]string, error) {
 	}
 
 	return metadata, err
+}
+
+// GetMetadata returns the value of a single metadata key set on the
+// subvolume. Unlike ListMetadata it propagates
+// ErrSubVolMetadataNotSupported, so that callers which require metadata
+// support can fail instead of degrading.
+func (s *subVolumeClient) GetMetadata(key string) (string, error) {
+	value, err := s.getMetadata(key)
+	if err != nil {
+		return "", fmt.Errorf("failed to get metadata key %q on subvolume %v: %w", key, s, err)
+	}
+
+	return value, nil
+}
+
+// SetMetadata sets a single metadata key on the subvolume. Unlike
+// SetAllMetadata it propagates ErrSubVolMetadataNotSupported, so that
+// callers which require metadata support can fail instead of degrading.
+func (s *subVolumeClient) SetMetadata(key, value string) error {
+	err := s.setMetadata(key, value)
+	if err != nil {
+		return fmt.Errorf("failed to set metadata key %q on subvolume %v: %w", key, s, err)
+	}
+
+	return nil
 }
 
 // SetAllMetadata set all the metadata from arg parameters on Ssubvolume.

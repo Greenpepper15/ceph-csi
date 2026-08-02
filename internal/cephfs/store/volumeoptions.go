@@ -1030,15 +1030,27 @@ func (vo *VolumeOptions) ConfigureEncryption(
 	vo.Encryption, err = util.NewVolumeEncryption(kmsID, kms, nil)
 
 	if errors.Is(err, util.ErrDEKStoreNeeded) {
-		// fscrypt uses secrets directly from the KMS.
-		// Therefore we do not support an additional DEK
-		// store. Since not all "metadata" KMS support
-		// GetSecret, test for support here. Postpone any
-		// other error handling
-		_, err := vo.Encryption.KMS.GetSecret(ctx, "")
-		if errors.Is(err, kmsapi.ErrGetSecretUnsupported) {
-			return err
-		}
+		return setupVolumeDEKStore(ctx, vo.Encryption, newSubVolumeDEKStore(vo))
+	}
+
+	return nil
+}
+
+// setupVolumeDEKStore attaches the given DEK store when the provider keeps
+// its wrapped DEK in the metadata of the volume. Otherwise fscrypt uses
+// secrets directly from the KMS; since not all "metadata" KMS support
+// GetSecret, support is tested here and any other error handling is
+// postponed.
+func setupVolumeDEKStore(ctx context.Context, enc *util.VolumeEncryption, store kmsapi.DEKStore) error {
+	if kmsapi.SupportsVolumeDEKStore(enc.KMS) {
+		enc.SetDEKStore(store)
+
+		return nil
+	}
+
+	_, err := enc.KMS.GetSecret(ctx, "")
+	if errors.Is(err, kmsapi.ErrGetSecretUnsupported) {
+		return err
 	}
 
 	return nil

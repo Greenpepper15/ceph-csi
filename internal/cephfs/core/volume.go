@@ -89,6 +89,12 @@ type SubVolumeClient interface {
 	UnsetAllMetadata(keys []string) error
 	// ListMetadata gets the metadata for the subvolume.
 	ListMetadata() (map[string]string, error)
+	// GetMetadata returns the value of a single metadata key, and fails
+	// when the cluster does not support subvolume metadata.
+	GetMetadata(key string) (string, error)
+	// SetMetadata sets a single metadata key, and fails when the cluster
+	// does not support subvolume metadata.
+	SetMetadata(key, value string) error
 
 	// PinVolume sets an MDS pinning policy on the subvolume.
 	// pinType is one of "export", "distributed" or "random".
