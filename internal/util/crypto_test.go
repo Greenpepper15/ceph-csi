@@ -38,6 +38,55 @@ func TestGenerateNewEncryptionPassphrase(t *testing.T) {
 	require.Len(t, passphrase, defaultEncryptionPassphraseSize)
 }
 
+func TestHasDEKStore(t *testing.T) {
+	t.Parallel()
+	secrets := map[string]string{
+		"encryptionPassphrase": "workflow test",
+	}
+
+	// the default KMS is an integrated DEK store
+	kmsProvider, err := kms.GetDefaultKMS(secrets)
+	require.NoError(t, err)
+
+	ve, err := NewVolumeEncryption("", kmsProvider, nil)
+	require.NoError(t, err)
+	require.True(t, ve.HasDEKStore())
+
+	// a KMS that returns ErrDEKStoreNeeded has no DEK store until one is
+	// configured with SetDEKStore
+	ve = &VolumeEncryption{KMS: kmsProvider}
+	require.False(t, ve.HasDEKStore())
+
+	dekStore, ok := kmsProvider.(kms.DEKStore)
+	require.True(t, ok)
+	ve.SetDEKStore(dekStore)
+	require.True(t, ve.HasDEKStore())
+}
+
+func TestDEKStoreNotConfigured(t *testing.T) {
+	t.Parallel()
+	secrets := map[string]string{
+		"encryptionPassphrase": "workflow test",
+	}
+
+	kmsProvider, err := kms.GetDefaultKMS(secrets)
+	require.NoError(t, err)
+
+	// a VolumeEncryption without a DEK store must return
+	// ErrDEKStoreNotFound instead of panicking
+	ve := &VolumeEncryption{KMS: kmsProvider}
+	ctx := t.Context()
+
+	err = ve.StoreCryptoPassphrase(ctx, "volume-id", "passphrase")
+	require.ErrorIs(t, err, ErrDEKStoreNotFound)
+
+	_, err = ve.GetCryptoPassphrase(ctx, "volume-id")
+	require.ErrorIs(t, err, ErrDEKStoreNotFound)
+
+	err = ve.RemoveDEK(ctx, "volume-id")
+	require.ErrorIs(t, err, ErrDEKStoreNotFound)
+}
+
 func TestKMSWorkflow(t *testing.T) {
 	t.Parallel()
 	secrets := map[string]string{

@@ -147,6 +147,13 @@ func (ve *VolumeEncryption) SetDEKStore(dekStore kms.DEKStore) {
 	ve.dekStore = dekStore
 }
 
+// HasDEKStore returns true when a DEKStore is configured, either because the
+// KMS is its own store or because the caller configured one with
+// SetDEKStore().
+func (ve *VolumeEncryption) HasDEKStore() bool {
+	return ve.dekStore != nil
+}
+
 // Destroy frees any resources that the VolumeEncryption instance allocated.
 func (ve *VolumeEncryption) Destroy() {
 	ve.KMS.Destroy()
@@ -174,6 +181,10 @@ func (ve *VolumeEncryption) CipherOptions() *cryptsetup.EncryptionOptions {
 // StoreCryptoPassphrase takes an unencrypted passphrase, encrypts it and saves
 // it in the DEKStore.
 func (ve *VolumeEncryption) StoreCryptoPassphrase(ctx context.Context, volumeID, passphrase string) error {
+	if ve.dekStore == nil {
+		return fmt.Errorf("can not store the passphrase for %s: %w", volumeID, ErrDEKStoreNotFound)
+	}
+
 	encryptedPassphrase, err := ve.KMS.EncryptDEK(ctx, volumeID, passphrase)
 	if err != nil {
 		return fmt.Errorf("failed encrypt the passphrase for %s: %w", volumeID, err)
@@ -199,6 +210,10 @@ func (ve *VolumeEncryption) StoreNewCryptoPassphrase(ctx context.Context, volume
 
 // GetCryptoPassphrase Retrieves passphrase to encrypt volume.
 func (ve *VolumeEncryption) GetCryptoPassphrase(ctx context.Context, volumeID string) (string, error) {
+	if ve.dekStore == nil {
+		return "", fmt.Errorf("can not fetch the passphrase for %s: %w", volumeID, ErrDEKStoreNotFound)
+	}
+
 	passphrase, err := ve.dekStore.FetchDEK(ctx, volumeID)
 	if err != nil {
 		return "", err

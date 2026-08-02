@@ -35,7 +35,6 @@ import (
 	"github.com/pkg/xattr"
 	"golang.org/x/sys/unix"
 
-	"github.com/ceph/ceph-csi/internal/kms"
 	"github.com/ceph/ceph-csi/internal/util"
 	"github.com/ceph/ceph-csi/internal/util/log"
 	"github.com/ceph/ceph-csi/pkg/util/kernel"
@@ -70,6 +69,22 @@ func AppendEncyptedSubdirectory(dir string) string {
 	return path.Join(dir, FscryptSubdir)
 }
 
+// sourceType returns the protector source for the volume. A KMS with a DEK
+// store provides a 32 byte key that is used as a raw key. A KMS that hands
+// out its secret directly uses it as a custom passphrase in fscrypt,
+// circumventing key derivation on the CSI side to allow users to fall back
+// on the fscrypt commandline tool easily.
+//
+// Changing the outcome of this mapping for an existing configuration makes
+// existing encrypted volumes unopenable.
+func sourceType(volEncryption *util.VolumeEncryption) fscryptmetadata.SourceType {
+	if volEncryption.HasDEKStore() {
+		return fscryptmetadata.SourceType_raw_key
+	}
+
+	return fscryptmetadata.SourceType_custom_passphrase
+}
+
 // getPassphrase returns the passphrase from the configured Ceph CSI KMS to be used as a protector key in fscrypt.
 func getPassphrase(ctx context.Context, encryption util.VolumeEncryption, volID string) (string, error) {
 	var (
@@ -77,15 +92,14 @@ func getPassphrase(ctx context.Context, encryption util.VolumeEncryption, volID 
 		err        error
 	)
 
-	switch encryption.KMS.RequiresDEKStore() {
-	case kms.DEKStoreIntegrated:
+	if encryption.HasDEKStore() {
 		passphrase, err = encryption.GetCryptoPassphrase(ctx, volID)
 		if err != nil {
 			log.ErrorLog(ctx, "fscrypt: failed to get passphrase from KMS: %v", err)
 
 			return "", err
 		}
-	case kms.DEKStoreMetadata:
+	} else {
 		passphrase, err = encryption.KMS.GetSecret(ctx, volID)
 		if err != nil {
 			log.ErrorLog(ctx, "fscrypt: failed to GetSecret: %v", err)
@@ -378,10 +392,10 @@ func Unlock(
 ) error {
 	keySize := -1
 
-	// In case of KMSes where we have integrated DEK stores, e.g. Vault
-	// the passphrase size must be of 32 bytes as fscrypt expects a 32
+	// In case of KMSes where we have a DEK store, e.g. Vault, the
+	// passphrase size must be of 32 bytes as fscrypt expects a 32
 	// byte key when the source type is `raw_key`.
-	if volEncryption.KMS.RequiresDEKStore() == kms.DEKStoreIntegrated {
+	if volEncryption.HasDEKStore() {
 		keySize = fscryptRawKeySize
 	}
 
@@ -445,16 +459,7 @@ func Unlock(
 
 	protectorName := FscryptProtectorPrefix
 
-	switch volEncryption.KMS.RequiresDEKStore() {
-	case kms.DEKStoreMetadata:
-		// Metadata style KMS use the KMS secret as a custom
-		// passphrase directly in fscrypt, circumenting key
-		// derivation on the CSI side to allow users to fall
-		// back on the fscrypt commandline tool easily
-		fscryptContext.Config.Source = fscryptmetadata.SourceType_custom_passphrase
-	case kms.DEKStoreIntegrated:
-		fscryptContext.Config.Source = fscryptmetadata.SourceType_raw_key
-	}
+	fscryptContext.Config.Source = sourceType(volEncryption)
 
 	if kernelPolicyExists && metadataDirExists {
 		log.DebugLog(ctx, "fscrypt: Encrypted directory already set up, policy exists")
@@ -464,7 +469,7 @@ func Unlock(
 
 	if !kernelPolicyExists && !metadataDirExists {
 		log.DebugLog(ctx, "fscrypt: Creating new protector and policy")
-		if volEncryption.KMS.RequiresDEKStore() == kms.DEKStoreIntegrated {
+		if volEncryption.HasDEKStore() {
 			if err := volEncryption.StoreNewCryptoPassphrase(ctx, volID, encryptionPassphraseSize); err != nil {
 				log.ErrorLog(ctx, "fscrypt: store new crypto passphrase failed: %v", err)
 
