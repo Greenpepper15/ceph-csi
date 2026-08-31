@@ -198,6 +198,10 @@ func (kms *keyProtectKMS) GetSecret(ctx context.Context, volumeID string) (strin
 	return "", ErrGetSecretUnsupported
 }
 
+// volumeDEKStoreSupported marks the wrapped DEK for storage in the metadata
+// of the volume.
+func (kms *keyProtectKMS) volumeDEKStoreSupported() {}
+
 func (kms *keyProtectKMS) getSecrets() (map[string]any, error) {
 	secretData, err := k8s.GetSecret(kms.secretName, kms.namespace)
 	if err != nil {

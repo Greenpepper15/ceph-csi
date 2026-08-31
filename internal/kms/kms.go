@@ -362,6 +362,22 @@ type DEKStore interface {
 	RemoveDEK(ctx context.Context, volumeID string) error
 }
 
+// volumeDEKStoreSupport is the marker for KMS providers whose wrapped DEK is
+// meant to be stored in the metadata of the volume itself.
+type volumeDEKStoreSupport interface {
+	volumeDEKStoreSupported()
+}
+
+// SupportsVolumeDEKStore returns true when the wrapped DEKs of the KMS may
+// be stored in the metadata of the volume. Providers opt in explicitly, so
+// that the location of the DEK is decided by the provider name in the KMS
+// configuration and can not change underneath existing volumes.
+func SupportsVolumeDEKStore(ekms EncryptionKMS) bool {
+	_, ok := ekms.(volumeDEKStoreSupport)
+
+	return ok
+}
+
 // integratedDEK is a DEKStore that can not be configured. Either the KMS does
 // not use a DEK, or the DEK is stored in the KMS without additional
 // configuration options.

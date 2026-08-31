@@ -41,6 +41,10 @@ import (
 const (
 	kmsTypeKMIP = "kmip"
 
+	// kmsTypeKMIPMetadata is the provider for a KMIP KMS whose wrapped
+	// DEK is stored in the metadata of the volume.
+	kmsTypeKMIPMetadata = "kmip-metadata"
+
 	// kmipDefaulfReadTimeout is the default read network timeout.
 	kmipDefaulfReadTimeout = 10
 
@@ -90,6 +94,39 @@ var _ = RegisterProvider(Provider{
 	Initializer: initKMIPKMS,
 })
 
+var _ = RegisterProvider(Provider{
+	UniqueID:    kmsTypeKMIPMetadata,
+	Initializer: initKMIPMetadataKMS,
+})
+
+// kmipMetadataKMS uses the managed key of the KMIP server to wrap and unwrap
+// the per-volume DEK, and declares that the wrapped DEK is stored in the
+// metadata of the volume. It is a distinct provider rather than an option of
+// the kmip provider, so that the location of a volume's DEK follows from the
+// provider name and can not change underneath existing volumes.
+type kmipMetadataKMS struct {
+	*kmipKMS
+}
+
+// GetSecret is not supported: this provider never hands out key material,
+// the DEK is wrapped and unwrapped in place.
+func (kms *kmipMetadataKMS) GetSecret(_ context.Context, _ string) (string, error) {
+	return "", ErrGetSecretUnsupported
+}
+
+// volumeDEKStoreSupported marks the wrapped DEK for storage in the metadata
+// of the volume.
+func (kms *kmipMetadataKMS) volumeDEKStoreSupported() {}
+
+func initKMIPMetadataKMS(args ProviderInitArgs) (EncryptionKMS, error) {
+	kms, err := newKMIPKMS(args)
+	if err != nil {
+		return nil, err
+	}
+
+	return &kmipMetadataKMS{kmipKMS: kms}, nil
+}
+
 type kmipKMS struct {
 	// basic options to get the secret
 	secretName string
@@ -105,6 +142,12 @@ type kmipKMS struct {
 }
 
 func initKMIPKMS(args ProviderInitArgs) (EncryptionKMS, error) {
+	return newKMIPKMS(args)
+}
+
+// newKMIPKMS reads the configuration and the credentials Secret, and returns
+// a connected kmipKMS for the initializers of both KMIP providers.
+func newKMIPKMS(args ProviderInitArgs) (*kmipKMS, error) {
 	kms := &kmipKMS{
 		namespace: args.Namespace,
 	}
